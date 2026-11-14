@@ -265,11 +265,13 @@
     let cachedD1Memories = [];
     let cachedD1ChappyProfile = [];
     let d1KnowledgeLoaded = false;
+    let d1KnowledgePromise = null;
 
     // WorkerからD1の各テーブルを読み込む（端末トークンは初回登録後、自動送信）
     async function requestWorkerList(path) {
       const deviceToken = localStorage.getItem(TOKEN_KEY);
       if (!deviceToken) throw new Error('端末登録が必要です');
+      const d1StartedAt = performance.now();
       const response = await fetch(API_URL + path, {
         method: 'POST',
         headers: {
@@ -282,12 +284,18 @@
         const errBody = await response.text();
         throw new Error('[Worker ' + path + ' Error ' + response.status + ']: ' + errBody);
       }
-      return await response.json();
+      const data = await response.json();
+      console.log('[計測] D1 ' + path + ': ' + Math.round(performance.now() - d1StartedAt) + 'ms');
+      return data;
     }
 
     // 固定ルール・お母さんの記憶・チャッピーのプロフィールをすべてD1から取得
     async function loadChappyKnowledge() {
       if (d1KnowledgeLoaded) return;
+      if (d1KnowledgePromise) return d1KnowledgePromise;
+
+      const totalStartedAt = performance.now();
+      d1KnowledgePromise = (async () => {
       const results = await Promise.all([
         requestWorkerList('/fixed-rules'),
         requestWorkerList('/memories'),
@@ -304,6 +312,15 @@
       cachedD1Memories = memoriesData.memories;
       cachedD1ChappyProfile = profileData.profile;
       d1KnowledgeLoaded = true;
+      console.log('[計測] D1 3テーブル合計: ' + Math.round(performance.now() - totalStartedAt) + 'ms');
+      })();
+
+      try {
+        await d1KnowledgePromise;
+      } catch (error) {
+        d1KnowledgePromise = null;
+        throw error;
+      }
     }
 
     // D1の3つのテーブルからチャッピーの会話プロンプトを組み立てる
@@ -504,6 +521,7 @@
         throw new Error('端末登録が必要です。setup.html から登録してください');
       }
 
+      const aiStartedAt = performance.now();
       const response = await fetch(API_URL + '/chat', {
         method: 'POST',
         headers: {
@@ -536,6 +554,7 @@
         throw new Error('チャッピーの返答テキストが空でした');
       }
 
+      console.log('[計測] AI応答（通信＋生成＋JSON解析）: ' + Math.round(performance.now() - aiStartedAt) + 'ms');
       return reply;
     }
 
@@ -553,6 +572,8 @@
 
         // チャット画面に返事を表示
         addChappyBubble(reply);
+        const replyShownAt = performance.now();
+        console.log('[計測] 返事の文字を表示');
         incrementCount();
 
         currentState = 'speaking';
@@ -563,7 +584,7 @@
           if (requestGeneration !== responseGeneration) return;
           currentState = 'idle';
           setButtonState('idle');
-        });
+        }, replyShownAt);
 
       } catch (error) {
         if (requestGeneration !== responseGeneration) return;
@@ -587,7 +608,7 @@
     }
 
 
-function speakChappyVoice(text, callback) {
+function speakChappyVoice(text, callback, replyShownAt) {
   const speechGeneration = responseGeneration;
   const speechText = removeEmojis(text).trim();
 
@@ -651,6 +672,7 @@ function speakChappyVoice(text, callback) {
 
     const speechPart = speechParts[partIndex];
     partIndex++;
+    const voiceRequestStartedAt = performance.now();
 
     fetch(VOICE_WORKER_URL, {
       method: 'POST',
@@ -691,7 +713,12 @@ function speakChappyVoice(text, callback) {
         };
 
         audio.onplaying = () => {
-          console.log("音声の再生開始:", performance.now());
+          const playingAt = performance.now();
+          console.log("音声の再生開始:", playingAt);
+          console.log('[計測] 音声URL取得から再生開始まで: ' + Math.round(playingAt - voiceRequestStartedAt) + 'ms');
+          if (typeof replyShownAt === 'number') {
+            console.log('[計測] 文字表示から音声開始まで: ' + Math.round(playingAt - replyShownAt) + 'ms');
+          }
         };
 
         const playResult = audio.play();
@@ -760,6 +787,11 @@ function speakChappyVoice(text, callback) {
         behavior: 'smooth'
       });
     }
+
+    // ページ表示直後にD1の知識を先読みし、最初の会話での待ち時間を減らす
+    loadChappyKnowledge().catch(error => {
+      console.warn('[先読み] D1の読み込みに失敗しました。会話開始時に再試行します:', error);
+    });
   </script>
 </body>
 </html>
